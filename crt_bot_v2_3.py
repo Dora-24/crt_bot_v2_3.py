@@ -29,8 +29,8 @@ Thread(target=run_dummy_server, daemon=True).start()
 # =====================================================================
 # CONFIGURATION SETTINGS
 # =====================================================================
-BOT_TOKEN = "8842544212:AAFqc5ajT9dDzZQf1iLv_4CTrWWlJ6dl3os"  # Bot Token ထည့်ပါ
-CHAT_ID = "6748141311"      # Chat ID ထည့်ပါ
+BOT_TOKEN = "8842544212:AAFqc5ajT9dDzZQf1iLv_4CTrWWlJ6dl3os"
+CHAT_ID = "6748141311"
 
 BYBIT_TICKERS_URL = "https://api.bybit.com/v5/market/tickers?category=linear"
 BYBIT_KLINES_URL = "https://api.bybit.com/v5/market/kline"
@@ -250,3 +250,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
