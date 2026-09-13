@@ -1,16 +1,36 @@
 import json
 import time
 import urllib.request
+import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # =====================================================================
+# DUMMY HTTP SERVER FOR RENDER WEB SERVICE
+# =====================================================================
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bybit CRT Bot v2.3 is Running!")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+    server.serve_forever()
+
+# Background Thread ဖြင့် Web Server စတင်ခြင်း
+Thread(target=run_dummy_server, daemon=True).start()
+
+# =====================================================================
 # CONFIGURATION SETTINGS
 # =====================================================================
-BOT_TOKEN = "8842544212:AAFqc5ajT9dDzZQf1iLv_4CTrWWlJ6dl3os"  # BotFather ထံမှ ရသော Token ထည့်ပါ
-CHAT_ID = "6748141311"      # မိမိ Telegram Chat ID သို့မဟုတ် Channel ID ထည့်ပါ
+BOT_TOKEN = "8842544212:AAFqc5ajT9dDzZQf1iLv_4CTrWWlJ6dl3os"  # Bot Token ထည့်ပါ
+CHAT_ID = "6748141311"      # Chat ID ထည့်ပါ
 
 BYBIT_TICKERS_URL = "https://api.bybit.com/v5/market/tickers?category=linear"
 BYBIT_KLINES_URL = "https://api.bybit.com/v5/market/kline"
@@ -68,26 +88,20 @@ def fetch_bybit_klines(symbol, interval, limit=10):
         return None
 
 # =====================================================================
-# CRT V2.3 ADVANCED STRATEGY FILTER ENGINE
+# CRT V2.3 STRATEGY ENGINE
 # =====================================================================
 def analyze_crt_pattern(symbol, tf):
     klines = fetch_bybit_klines(symbol, tf, limit=10)
     if not klines or len(klines) < 4:
         return None
 
-    # Sequence Mapping:
-    # C1 = Range Candle
-    # C2 = Liquidity Sweep Candle
-    # C3 = Trigger/Confirmation Candle
     c1 = klines[-3]
     c2 = klines[-2]
     c3 = klines[-1]
 
     c1_high, c1_low = c1['high'], c1['low']
     c1_open, c1_close = c1['open'], c1['close']
-    c1_body_max = max(c1_open, c1_close)
-    c1_body_min = min(c1_open, c1_close)
-
+    
     c2_high, c2_low = c2['high'], c2['low']
     c2_open, c2_close = c2['open'], c2['close']
     c2_body_max = max(c2_open, c2_close)
@@ -96,16 +110,10 @@ def analyze_crt_pattern(symbol, tf):
     c3_close = c3['close']
     tf_label = "1h" if tf == '60' else f"{tf}m"
 
-    # --- 🟢 1. BULLISH CRT SETUP (STRONG BUY FILTER) ---
-    # Core Sweep Condition: C2 Low sweep C1 Low, but C2 Body holds above C1 Low
+    # BULLISH CRT
     is_bullish_sweep = (c2_low < c1_low) and (c2_body_min >= c1_low)
-    
-    # v2.3 Extra Filters:
-    # (a) C2 Close Confirmation: C2 close price must not break below C1 Low.
-    # (b) Anti-Bullshit Filter: Avoid consecutive weak/fake expansion candles where C1 body was invalid.
     c1_valid_range = (c1_high - c1_low) > 0
-    c2_clean_sweep = c2_close > c2_low  # Prevents full bearish momentum dump on C2
-    
+    c2_clean_sweep = c2_close > c2_low
     is_buy_triggered = c3_close > c2_high
 
     if is_bullish_sweep and c2_clean_sweep and c1_valid_range and is_buy_triggered:
@@ -133,13 +141,9 @@ def analyze_crt_pattern(symbol, tf):
                     'time': c3['time']
                 }
 
-    # --- 🔴 2. BEARISH CRT SETUP (STRONG SELL FILTER) ---
-    # Core Sweep Condition: C2 High sweep C1 High, but C2 Body holds below C1 High
+    # BEARISH CRT
     is_bearish_sweep = (c2_high > c1_high) and (c2_body_max <= c1_high)
-    
-    # v2.3 Extra Filters:
-    c2_clean_bear_sweep = c2_close < c2_high  # Prevents full bullish momentum explosion on C2
-    
+    c2_clean_bear_sweep = c2_close < c2_high
     is_sell_triggered = c3_close < c2_low
 
     if is_bearish_sweep and c2_clean_bear_sweep and c1_valid_range and is_sell_triggered:
@@ -215,7 +219,7 @@ async def auto_scan_job(context: ContextTypes.DEFAULT_TYPE):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "🤖 <b>Bybit CRT Scanner Bot v2.3 Active!</b>\n\n"
-        "• Strict Filter များဖြင့် စစ်ထုတ်ထားသော Pure CRT Signal များကို Noti ပို့ပေးပါမည်။\n"
+        "• Strict Filter များဖြင့် Pure CRT Signal များကို Noti ပို့ပေးပါမည်။\n"
         "• /scan ဟု ရိုက်ပြီး Manual Scan ဖတ်နိုင်ပါသည်။"
     )
     await update.message.reply_text(welcome_text, parse_mode='HTML')
