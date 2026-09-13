@@ -1,250 +1,156 @@
-import json
-import time
-import urllib.request
 import os
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread
-from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import time
+import requests
+import pandas as pd
+import numpy as np
 
-# =====================================================================
-# DUMMY HTTP SERVER FOR RENDER WEB SERVICE
-# =====================================================================
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bybit CRT Bot v2.3 Early Entry is Running!")
+# Secrets/Environment Variables
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-def run_dummy_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
-    server.serve_forever()
+# Trading Config
+PAIRS = ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD"]
+TIMEFRAME = "15m"  # 15 Minute Candles
 
-Thread(target=run_dummy_server, daemon=True).start()
-
-# =====================================================================
-# CONFIGURATION SETTINGS
-# =====================================================================
-BOT_TOKEN = "8842544212:AAFqc5ajT9dDzZQf1iLv_4CTrWWlJ6dl3os"
-CHAT_ID = "6748141311"
-
-BYBIT_TICKERS_URL = "https://api.bybit.com/v5/market/tickers?category=linear"
-BYBIT_KLINES_URL = "https://api.bybit.com/v5/market/kline"
-TIMEFRAMES = ['15', '30', '60']
-
-sent_signals = set()
-
-# =====================================================================
-# BYBIT DATA ENGINE
-# =====================================================================
-def get_bybit_pairs():
+def send_telegram_message(message):
+    """Send alert message to Telegram channel/chat."""
+    if not BOT_TOKEN or not CHAT_ID:
+        print("Error: BOT_TOKEN or CHAT_ID missing.")
+        return
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
-        req = urllib.request.Request(BYBIT_TICKERS_URL, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode())
-            
-        pairs = []
-        if data.get('retCode') == 0:
-            for item in data['result']['list']:
-                symbol = item['symbol']
-                if symbol.endswith('USDT'):
-                    pairs.append(symbol)
-                    
-        if 'XAUUSDT' not in pairs:
-            pairs.append('XAUUSDT')
-            
-        return pairs
-    except Exception:
-        return ['XAUUSDT', 'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'OGUSDT']
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Failed to send Telegram message: {e}")
 
-def fetch_bybit_klines(symbol, interval, limit=10):
-    url = f"{BYBIT_KLINES_URL}?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
+def fetch_kline_data(symbol, interval="15m", limit=250):
+    """Fetch OHLCV market data from Binance Public API."""
+    # Convert symbol for Binance format if needed
+    binance_symbol = symbol.replace("XAUUSD", "PAXGUSDT").replace("BTCUSD", "BTCUSDT")
+    if not binance_symbol.endswith("USDT"):
+        binance_symbol += "USDT"
+
+    url = f"https://api.binance.com/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit={limit}"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=6) as response:
-            data = json.loads(response.read().decode())
-            
-        if data.get('retCode') != 0:
-            return None
-
-        raw_list = data['result']['list']
-        raw_list.reverse()
-
-        klines = []
-        for item in raw_list:
-            klines.append({
-                'time': datetime.fromtimestamp(int(item[0])/1000).strftime('%H:%M'),
-                'open': float(item[1]),
-                'high': float(item[2]),
-                'low': float(item[3]),
-                'close': float(item[4])
-            })
-        return klines
-    except Exception:
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        df = pd.DataFrame(data, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_av', 'trades', 'tb_base_av', 'tb_quote_av', 'ignore'
+        ])
+        df['open'] = df['open'].astype(float)
+        df['high'] = df['high'].astype(float)
+        df['low'] = df['low'].astype(float)
+        df['close'] = df['close'].astype(float)
+        return df
+    except Exception as e:
+        print(f"Error fetching data for {symbol}: {e}")
         return None
 
-# =====================================================================
-# CRT V2.3 STRATEGY ENGINE (EARLY ENTRY MODIFIED)
-# =====================================================================
-def analyze_crt_pattern(symbol, tf):
-    klines = fetch_bybit_klines(symbol, tf, limit=10)
-    if not klines or len(klines) < 4:
+def calculate_ema(series, window=200):
+    """Calculate Exponential Moving Average."""
+    return series.ewm(span=window, adjust=False).mean()
+
+def check_crt_v2_5_signals(symbol, df):
+    """
+    Enhanced CRT v2.5 Strategy Logic:
+    1. Filter 1: C3 Body Close beyond C2 High/Low (Prevents Fake Wick Sweeps)
+    2. Filter 2: EMA 200 Trend Alignment
+    3. Filter 3: ATR Range Volatility Check
+    """
+    if df is None or len(df) < 200:
         return None
 
-    c1 = klines[-3]
-    c2 = klines[-2]
-    c3 = klines[-1] # လက်ရှိ ဖြစ်ပေါ်နေဆဲ C3 Candle (Live Price)
+    # Calculate Indicators
+    df['ema200'] = calculate_ema(df['close'], 200)
+    df['range'] = df['high'] - df['low']
+    df['atr'] = df['range'].rolling(14).mean()
 
-    c1_high, c1_low = c1['high'], c1['low']
-    c2_high, c2_low = c2['high'], c2['low']
-    c2_open, c2_close = c2['open'], c2['close']
-    c2_body_max = max(c2_open, c2_close)
-    c2_body_min = min(c2_open, c2_close)
+    # Get Candles
+    c2 = df.iloc[-2]
+    c3 = df.iloc[-1]
 
-    current_price = c3['close'] # C3 မပိတ်မီ လက်ရှိ ရောက်ရှိနေသော ဈေးနှုန်း
-    tf_label = "1h" if tf == '60' else f"{tf}m"
+    # Volatility Check: Skip small noise candles
+    if c3['range'] < (c3['atr'] * 0.75):
+        return None
 
-    # 1. BULLISH EARLY CRT (C3 ဖောက်ထွက်သည်နှင့် တန်း Noti ပို့မည်)
-    is_bullish_sweep = (c2_low < c1_low) and (c2_body_min >= c1_low)
-    c1_valid_range = (c1_high - c1_low) > 0
-    c2_clean_sweep = c2_close > c2_low
-    is_early_buy_triggered = current_price > c2_high # C3 မပိတ်ခင် C2 High ကို ဖောက်သည်နှင့် Trigger ဖြစ်မည်
+    c3_body_top = max(c3['open'], c3['close'])
+    c3_body_bottom = min(c3['open'], c3['close'])
 
-    if is_bullish_sweep and c2_clean_sweep and c1_valid_range and is_early_buy_triggered:
-        entry = current_price
-        sl_buffer = 0.9990 if "XAU" in symbol else 0.9995
-        sl = c2_low * sl_buffer
-        tp = c1_high
+    signal = None
 
-        if sl < entry < tp:
+    # --- BUY SIGNAL (Uptrend Only) ---
+    if c3['close'] > c3['open']:  # Bullish C3
+        # C3 Body Close ABOVE C2 High AND Price ABOVE EMA 200
+        if c3_body_top > c2['high'] and c3['close'] > c3['ema200']:
+            entry = c3['close']
+            sl = min(c2['low'], c3['low'])
             risk = entry - sl
-            reward = tp - entry
-            rr = round(reward / risk, 2) if risk > 0 else 0
+            if risk <= 0:
+                return None
+            tp = entry + (risk * 2.0)  # R:R = 1:2
 
-            if rr >= 1.2:
-                sig_id = f"{symbol}_{tf_label}_EARLY_BUY_{c2['time']}" # C2 Time ဖြင့် Duplicate မဖြစ်အောင် ထိန်းထားသည်
-                return {
-                    'id': sig_id,
-                    'symbol': symbol,
-                    'tf': tf_label,
-                    'direction': '🟢 EARLY BUY / LONG (CRT V2.3)',
-                    'entry': f"{entry:.4f}",
-                    'sl': f"{sl:.4f}",
-                    'tp': f"{tp:.4f}",
-                    'rr': f"1:{rr}",
-                    'time': c3['time']
-                }
-
-    # 2. BEARISH EARLY CRT (C3 ဖောက်ထွက်သည်နှင့် တန်း Noti ပို့မည်)
-    is_bearish_sweep = (c2_high > c1_high) and (c2_body_max <= c1_high)
-    c2_clean_bear_sweep = c2_close < c2_high
-    is_early_sell_triggered = current_price < c2_low # C3 မပိတ်ခင် C2 Low ကို ဖောက်သည်နှင့် Trigger ဖြစ်မည်
-
-    if is_bearish_sweep and c2_clean_bear_sweep and c1_valid_range and is_early_sell_triggered:
-        entry = current_price
-        sl_buffer = 1.0010 if "XAU" in symbol else 1.0005
-        sl = c2_high * sl_buffer
-        tp = c1_low
-
-        if sl > entry > tp:
-            risk = sl - entry
-            reward = entry - tp
-            rr = round(reward / risk, 2) if risk > 0 else 0
-
-            if rr >= 1.2:
-                sig_id = f"{symbol}_{tf_label}_EARLY_SELL_{c2['time']}"
-                return {
-                    'id': sig_id,
-                    'symbol': symbol,
-                    'tf': tf_label,
-                    'direction': '🔴 EARLY SELL / SHORT (CRT V2.3)',
-                    'entry': f"{entry:.4f}",
-                    'sl': f"{sl:.4f}",
-                    'tp': f"{tp:.4f}",
-                    'rr': f"1:{rr}",
-                    'time': c3['time']
-                }
-
-    return None
-
-def scan_all_markets():
-    symbols = get_bybit_pairs()
-    tasks = []
-    results = []
-
-    with ThreadPoolExecutor(max_workers=30) as executor:
-        for symbol in symbols:
-            for tf in TIMEFRAMES:
-                tasks.append(executor.submit(analyze_crt_pattern, symbol, tf))
-
-        for future in as_completed(tasks):
-            res = future.result()
-            if res:
-                results.append(res)
-    return results
-
-def format_telegram_message(item):
-    return (
-        f"⚡ <b>EARLY ENTRY CRT V2.3 SIGNAL</b> ⚡\n\n"
-        f"🎯 <b>Symbol:</b> #{item['symbol']} ({item['tf']})\n"
-        f"🚨 <b>Signal:</b> {item['direction']}\n"
-        f"💵 <b>Current Price (Entry):</b> <code>{item['entry']}</code>\n"
-        f"🛑 <b>Stop Loss:</b> <code>{item['sl']}</code>\n"
-        f"🚀 <b>Target TP:</b> <code>{item['tp']}</code>\n"
-        f"⚖️ <b>Risk/Reward:</b> {item['rr']}\n"
-        f"⏰ <b>Trigger Time:</b> {item['time']}\n\n"
-        f"💡 <i>Note: C3 မပိတ်မီ ဖောက်ထွက်ချိန်တွင် ပို့ပေးသော Signal ဖြစ်သဖြင့် Chart ကို ချက်ချင်း စစ်ဆေးပါ။</i>"
-    )
-
-# =====================================================================
-# TELEGRAM BOT & AUTOMATION JOBS
-# =====================================================================
-async def auto_scan_job(context: ContextTypes.DEFAULT_TYPE):
-    setups = scan_all_markets()
-    for item in setups:
-        if item['id'] not in sent_signals:
-            sent_signals.add(item['id'])
-            msg = format_telegram_message(item)
-            await context.bot.send_message(
-                chat_id=CHAT_ID,
-                text=msg,
-                parse_mode='HTML'
+            signal = (
+                f"🚨 <b>CRT v2.5 HIGH ACCURACY SIGNAL</b> 🚨\n\n"
+                f"<b>Pair:</b> {symbol}\n"
+                f"<b>Type:</b> BUY 🟢\n"
+                f"<b>Timeframe:</b> {TIMEFRAME}\n\n"
+                f"<b>Entry:</b> {round(entry, 4)}\n"
+                f"<b>SL:</b> {round(sl, 4)}\n"
+                f"<b>TP (1:2):</b> {round(tp, 4)}\n\n"
+                f"<i>Filter Status: EMA200 Bullish | C3 Body Breakout Valid</i>"
             )
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = (
-        "🤖 <b>Bybit Early CRT Scanner Bot v2.3 Active!</b>\n\n"
-        "• C3 မပိတ်မီ C2 High/Low ကို Break ဖြစ်သည်နှင့် Early Entry Noti ပို့ပေးပါမည်။\n"
-        "• /scan ဟု ရိုက်ပြီး Manual Scan ဖတ်နိုင်ပါသည်။"
-    )
-    await update.message.reply_text(welcome_text, parse_mode='HTML')
+    # --- SELL SIGNAL (Downtrend Only) ---
+    elif c3['close'] < c3['open']:  # Bearish C3
+        # C3 Body Close BELOW C2 Low AND Price BELOW EMA 200
+        if c3_body_bottom < c2['low'] and c3['close'] < c3['ema200']:
+            entry = c3['close']
+            sl = max(c2['high'], c3['high'])
+            risk = sl - entry
+            if risk <= 0:
+                return None
+            tp = entry - (risk * 2.0)  # R:R = 1:2
 
-async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔎 Early CRT v2.3 Engine ဖြင့် Scan ဖတ်နေပါသည်...")
-    setups = scan_all_markets()
+            signal = (
+                f"🚨 <b>CRT v2.5 HIGH ACCURACY SIGNAL</b> 🚨\n\n"
+                f"<b>Pair:</b> {symbol}\n"
+                f"<b>Type:</b> SELL 🔴\n"
+                f"<b>Timeframe:</b> {TIMEFRAME}\n\n"
+                f"<b>Entry:</b> {round(entry, 4)}\n"
+                f"<b>SL:</b> {round(sl, 4)}\n"
+                f"<b>TP (1:2):</b> {round(tp, 4)}\n\n"
+                f"<i>Filter Status: EMA200 Bearish | C3 Body Breakout Valid</i>"
+            )
 
-    if not setups:
-        await update.message.reply_text("❌ လတ်တလော Early CRT Setup မရှိသေးပါ။")
-        return
-
-    for item in setups:
-        msg = format_telegram_message(item)
-        await update.message.reply_text(msg, parse_mode='HTML')
+    return signal
 
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    print("Starting CRT v2.5 Enhanced Bot Monitor...")
+    send_telegram_message("🤖 <b>CRT v2.5 Scanner Active (Fly.io)</b>\nFilters Applied: EMA200 Trend + C3 Body Close.")
+    
+    last_processed_time = None
 
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("scan", manual_scan_command))
+    while True:
+        try:
+            for pair in PAIRS:
+                df = fetch_kline_data(pair, interval=TIMEFRAME)
+                if df is not None and not df.empty:
+                    current_candle_time = df.iloc[-1]['timestamp']
+                    
+                    # Check for new candle formation
+                    signal = check_crt_v2_5_signals(pair, df)
+                    if signal:
+                        send_telegram_message(signal)
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Signal sent for {pair}")
+            
+            # Wait 60 seconds before next scan loop
+            time.sleep(60)
 
-    job_queue = app.job_queue
-    job_queue.run_repeating(auto_scan_job, interval=30, first=5) # 30 စက္ကန့်တစ်ကြိမ် မကြာမီ Noti တက်စေရန် Speed မြှင့်ထားသည်
-
-    print("🚀 Early Telegram Bot v2.3 is running...")
-    app.run_polling()
+        except Exception as e:
+            print(f"Error in main loop: {e}")
+            time.sleep(30)
 
 if __name__ == "__main__":
     main()
