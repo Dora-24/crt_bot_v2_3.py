@@ -16,14 +16,13 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bybit CRT Bot v2.3 is Running!")
+        self.wfile.write(b"Bybit CRT Bot v2.3 Early Entry is Running!")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
     server.serve_forever()
 
-# Background Thread ဖြင့် Web Server စတင်ခြင်း
 Thread(target=run_dummy_server, daemon=True).start()
 
 # =====================================================================
@@ -88,7 +87,7 @@ def fetch_bybit_klines(symbol, interval, limit=10):
         return None
 
 # =====================================================================
-# CRT V2.3 STRATEGY ENGINE
+# CRT V2.3 STRATEGY ENGINE (EARLY ENTRY MODIFIED)
 # =====================================================================
 def analyze_crt_pattern(symbol, tf):
     klines = fetch_bybit_klines(symbol, tf, limit=10)
@@ -97,27 +96,25 @@ def analyze_crt_pattern(symbol, tf):
 
     c1 = klines[-3]
     c2 = klines[-2]
-    c3 = klines[-1]
+    c3 = klines[-1] # လက်ရှိ ဖြစ်ပေါ်နေဆဲ C3 Candle (Live Price)
 
     c1_high, c1_low = c1['high'], c1['low']
-    c1_open, c1_close = c1['open'], c1['close']
-    
     c2_high, c2_low = c2['high'], c2['low']
     c2_open, c2_close = c2['open'], c2['close']
     c2_body_max = max(c2_open, c2_close)
     c2_body_min = min(c2_open, c2_close)
 
-    c3_close = c3['close']
+    current_price = c3['close'] # C3 မပိတ်မီ လက်ရှိ ရောက်ရှိနေသော ဈေးနှုန်း
     tf_label = "1h" if tf == '60' else f"{tf}m"
 
-    # BULLISH CRT
+    # 1. BULLISH EARLY CRT (C3 ဖောက်ထွက်သည်နှင့် တန်း Noti ပို့မည်)
     is_bullish_sweep = (c2_low < c1_low) and (c2_body_min >= c1_low)
     c1_valid_range = (c1_high - c1_low) > 0
     c2_clean_sweep = c2_close > c2_low
-    is_buy_triggered = c3_close > c2_high
+    is_early_buy_triggered = current_price > c2_high # C3 မပိတ်ခင် C2 High ကို ဖောက်သည်နှင့် Trigger ဖြစ်မည်
 
-    if is_bullish_sweep and c2_clean_sweep and c1_valid_range and is_buy_triggered:
-        entry = c3_close
+    if is_bullish_sweep and c2_clean_sweep and c1_valid_range and is_early_buy_triggered:
+        entry = current_price
         sl_buffer = 0.9990 if "XAU" in symbol else 0.9995
         sl = c2_low * sl_buffer
         tp = c1_high
@@ -128,12 +125,12 @@ def analyze_crt_pattern(symbol, tf):
             rr = round(reward / risk, 2) if risk > 0 else 0
 
             if rr >= 1.2:
-                sig_id = f"{symbol}_{tf_label}_BUY_{c3['time']}"
+                sig_id = f"{symbol}_{tf_label}_EARLY_BUY_{c2['time']}" # C2 Time ဖြင့် Duplicate မဖြစ်အောင် ထိန်းထားသည်
                 return {
                     'id': sig_id,
                     'symbol': symbol,
                     'tf': tf_label,
-                    'direction': '🟢 BUY / LONG (PURE CRT V2.3)',
+                    'direction': '🟢 EARLY BUY / LONG (CRT V2.3)',
                     'entry': f"{entry:.4f}",
                     'sl': f"{sl:.4f}",
                     'tp': f"{tp:.4f}",
@@ -141,13 +138,13 @@ def analyze_crt_pattern(symbol, tf):
                     'time': c3['time']
                 }
 
-    # BEARISH CRT
+    # 2. BEARISH EARLY CRT (C3 ဖောက်ထွက်သည်နှင့် တန်း Noti ပို့မည်)
     is_bearish_sweep = (c2_high > c1_high) and (c2_body_max <= c1_high)
     c2_clean_bear_sweep = c2_close < c2_high
-    is_sell_triggered = c3_close < c2_low
+    is_early_sell_triggered = current_price < c2_low # C3 မပိတ်ခင် C2 Low ကို ဖောက်သည်နှင့် Trigger ဖြစ်မည်
 
-    if is_bearish_sweep and c2_clean_bear_sweep and c1_valid_range and is_sell_triggered:
-        entry = c3_close
+    if is_bearish_sweep and c2_clean_bear_sweep and c1_valid_range and is_early_sell_triggered:
+        entry = current_price
         sl_buffer = 1.0010 if "XAU" in symbol else 1.0005
         sl = c2_high * sl_buffer
         tp = c1_low
@@ -158,12 +155,12 @@ def analyze_crt_pattern(symbol, tf):
             rr = round(reward / risk, 2) if risk > 0 else 0
 
             if rr >= 1.2:
-                sig_id = f"{symbol}_{tf_label}_SELL_{c3['time']}"
+                sig_id = f"{symbol}_{tf_label}_EARLY_SELL_{c2['time']}"
                 return {
                     'id': sig_id,
                     'symbol': symbol,
                     'tf': tf_label,
-                    'direction': '🔴 SELL / SHORT (PURE CRT V2.3)',
+                    'direction': '🔴 EARLY SELL / SHORT (CRT V2.3)',
                     'entry': f"{entry:.4f}",
                     'sl': f"{sl:.4f}",
                     'tp': f"{tp:.4f}",
@@ -191,14 +188,15 @@ def scan_all_markets():
 
 def format_telegram_message(item):
     return (
-        f"🚨 <b>PURE CRT V2.3 SIGNAL</b> 🚨\n\n"
+        f"⚡ <b>EARLY ENTRY CRT V2.3 SIGNAL</b> ⚡\n\n"
         f"🎯 <b>Symbol:</b> #{item['symbol']} ({item['tf']})\n"
-        f"⚡ <b>Signal:</b> {item['direction']}\n"
-        f"💵 <b>Entry Price:</b> <code>{item['entry']}</code>\n"
+        f"🚨 <b>Signal:</b> {item['direction']}\n"
+        f"💵 <b>Current Price (Entry):</b> <code>{item['entry']}</code>\n"
         f"🛑 <b>Stop Loss:</b> <code>{item['sl']}</code>\n"
         f"🚀 <b>Target TP:</b> <code>{item['tp']}</code>\n"
         f"⚖️ <b>Risk/Reward:</b> {item['rr']}\n"
-        f"⏰ <b>Candle Time:</b> {item['time']}\n"
+        f"⏰ <b>Trigger Time:</b> {item['time']}\n\n"
+        f"💡 <i>Note: C3 မပိတ်မီ ဖောက်ထွက်ချိန်တွင် ပို့ပေးသော Signal ဖြစ်သဖြင့် Chart ကို ချက်ချင်း စစ်ဆေးပါ။</i>"
     )
 
 # =====================================================================
@@ -218,18 +216,18 @@ async def auto_scan_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "🤖 <b>Bybit CRT Scanner Bot v2.3 Active!</b>\n\n"
-        "• Strict Filter များဖြင့် Pure CRT Signal များကို Noti ပို့ပေးပါမည်။\n"
+        "🤖 <b>Bybit Early CRT Scanner Bot v2.3 Active!</b>\n\n"
+        "• C3 မပိတ်မီ C2 High/Low ကို Break ဖြစ်သည်နှင့် Early Entry Noti ပို့ပေးပါမည်။\n"
         "• /scan ဟု ရိုက်ပြီး Manual Scan ဖတ်နိုင်ပါသည်။"
     )
     await update.message.reply_text(welcome_text, parse_mode='HTML')
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔎 Pure CRT v2.3 Engine ဖြင့် Scan ဖတ်နေပါသည်...")
+    await update.message.reply_text("🔎 Early CRT v2.3 Engine ဖြင့် Scan ဖတ်နေပါသည်...")
     setups = scan_all_markets()
 
     if not setups:
-        await update.message.reply_text("❌ လတ်တလော V2.3 Rules နှင့် ညီသော Setup မရှိသေးပါ။")
+        await update.message.reply_text("❌ လတ်တလော Early CRT Setup မရှိသေးပါ။")
         return
 
     for item in setups:
@@ -243,11 +241,10 @@ def main():
     app.add_handler(CommandHandler("scan", manual_scan_command))
 
     job_queue = app.job_queue
-    job_queue.run_repeating(auto_scan_job, interval=300, first=10)
+    job_queue.run_repeating(auto_scan_job, interval=30, first=5) # 30 စက္ကန့်တစ်ကြိမ် မကြာမီ Noti တက်စေရန် Speed မြှင့်ထားသည်
 
-    print("🚀 Telegram Bot v2.3 is running...")
+    print("🚀 Early Telegram Bot v2.3 is running...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
